@@ -1,0 +1,1095 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+LIB_DIR="${HA_MINECRAFT_LIB_DIR:-/usr/local/lib/ha-minecraft}"
+# shellcheck source=/usr/local/lib/ha-minecraft/common.sh
+. "${LIB_DIR}/common.sh"
+# shellcheck source=/usr/local/lib/ha-minecraft/backup.sh
+. "${LIB_DIR}/backup.sh"
+
+SERVER_PID=""
+BACKUP_LOOP_PID=""
+AUTOPAUSE_PID=""
+PAPER_LEGACY_CLEANUP_PID=""
+MQTT_EXPORTER_PID=""
+PLUGIN_BROWSER_PID=""
+PLAYIT_PID=""
+STOPPING="FALSE"
+LEVEL_NAME=""
+SERVER_TYPE=""
+COMMAND_DIR="${MINECRAFT_COMMAND_DIR:-/tmp/ha-minecraft-commands}"
+READY_FILE="${MINECRAFT_CONTROLLER_READY_FILE:-/tmp/ha-minecraft-controller-ready}"
+CONTROL_STATE_FILE="${MINECRAFT_CONTROL_STATE_FILE:-/tmp/ha-minecraft-control-state}"
+PLAYIT_STATE_FILE="${MINECRAFT_PLAYIT_STATE_FILE:-/tmp/ha-minecraft-playit-state}"
+PLAYIT_ADDRESS_FILE="${MINECRAFT_PLAYIT_ADDRESS_FILE:-/tmp/ha-minecraft-playit-address}"
+BEDROCK_STATUS_FILE="${MINECRAFT_BEDROCK_STATUS_FILE:-/tmp/ha-minecraft-bedrock-status.json}"
+SECURITY_STATUS_FILE="${MINECRAFT_SECURITY_STATUS_FILE:-/tmp/ha-minecraft-security-status.json}"
+SECURITY_POLL_INTERVAL_SECONDS="${MINECRAFT_SECURITY_POLL_INTERVAL_SECONDS:-30}"
+SECURITY_LAST_POLL=0
+
+set_control_state() {
+  local state="$1"
+  mkdir -p "$(dirname "${CONTROL_STATE_FILE}")"
+  printf '%s\n' "${state}" > "${CONTROL_STATE_FILE}"
+}
+
+set_playit_state() {
+  local state="$1"
+  mkdir -p "$(dirname "${PLAYIT_STATE_FILE}")"
+  printf '%s\n' "${state}" > "${PLAYIT_STATE_FILE}"
+}
+
+set_playit_address() {
+  local address="$1"
+  mkdir -p "$(dirname "${PLAYIT_ADDRESS_FILE}")"
+  printf '%s\n' "${address}" > "${PLAYIT_ADDRESS_FILE}"
+}
+
+combine_csv() {
+  local first="$1"
+  local second="$2"
+  if [[ -n "${first}" && -n "${second}" ]]; then
+    printf '%s,%s\n' "${first}" "${second}"
+  else
+    printf '%s%s\n' "${first}" "${second}"
+  fi
+}
+
+combine_lines() {
+  local first="$1"
+  local second="$2"
+  if [[ -n "${first}" && -n "${second}" ]]; then
+    printf '%s\n%s\n' "${first}" "${second}"
+  else
+    printf '%s%s\n' "${first}" "${second}"
+  fi
+}
+
+ensure_jvm_system_property() {
+  local existing="$1"
+  local property="$2"
+  local option="-D${property}=true"
+
+  if [[ " ${existing} " == *" -D${property}="* ]]; then
+    printf '%s\n' "${existing}"
+  elif [[ -n "${existing}" ]]; then
+    printf '%s %s\n' "${existing}" "${option}"
+  else
+    printf '%s\n' "${option}"
+  fi
+}
+
+sanitize_plugin_slug() {
+  local slug="$1"
+  slug="${slug//$'\r'/}"
+  slug="${slug## }"
+  slug="${slug%% }"
+  printf '%s\n' "${slug}"
+}
+
+paper_migration_marker() {
+  local level_name="$1"
+  local safe_name
+  safe_name="$(printf '%s' "${level_name}" | tr -c 'A-Za-z0-9_.-' '_')"
+  printf '%s/.paper-world-migration-backup-v2-%s\n' "${MC_DATA_DIR}" "${safe_name}"
+}
+
+paper_legacy_migration_marker() {
+  local level_name="$1"
+  local safe_name
+  safe_name="$(printf '%s' "${level_name}" | tr -c 'A-Za-z0-9_.-' '_')"
+  printf '%s/.paper-world-migration-backup-%s\n' "${MC_DATA_DIR}" "${safe_name}"
+}
+
+paper_dimension_data_current() {
+  local world_root="$1"
+  [[ -f "${world_root}/data/paper/metadata.dat" && -f "${world_root}/data/paper/level_overrides.dat" ]]
+}
+
+paper_legacy_dimensions_exist() {
+  local level_name="$1"
+  [[ -d "${MC_DATA_DIR}/${level_name}_nether" || -d "${MC_DATA_DIR}/${level_name}_the_end" ]]
+}
+
+paper_world_migration_needed() {
+  local level_name="$1"
+  local root="${MC_DATA_DIR}/${level_name}"
+  local dim_root
+
+  [[ -f "${root}/level.dat" ]] || return 1
+  paper_legacy_dimensions_exist "${level_name}" || return 1
+  paper_dimension_data_current "${root}" || return 0
+
+  for dim_root in "${MC_DATA_DIR}/${level_name}_nether" "${MC_DATA_DIR}/${level_name}_the_end"; do
+    if [[ -f "${dim_root}/level.dat" ]] && ! paper_dimension_data_current "${dim_root}"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+maybe_backup_before_paper_world_migration() {
+  local marker legacy_marker previous_min_interval previous_enable_rcon
+  [[ "${SERVER_TYPE}" == "PAPER" || "${SERVER_TYPE}" == "PURPUR" ]] || return 0
+  [[ -n "${LEVEL_NAME}" ]] || return 0
+  world_has_level_data "${MC_DATA_DIR}/${LEVEL_NAME}" || return 0
+  paper_world_migration_needed "${LEVEL_NAME}" || return 0
+
+  marker="$(paper_migration_marker "${LEVEL_NAME}")"
+  legacy_marker="$(paper_legacy_migration_marker "${LEVEL_NAME}")"
+  if [[ -e "${marker}" || -e "${legacy_marker}" ]]; then
+    log "backup" "Paper/Purpur migration still appears pending for ${LEVEL_NAME}; migration backup marker already exists"
+    return 0
+  fi
+
+  log "backup" "Creating one-time backup before Paper/Purpur world storage migration for ${LEVEL_NAME}"
+  previous_min_interval="${BACKUP_MIN_INTERVAL_MINUTES:-30}"
+  previous_enable_rcon="${ENABLE_RCON:-FALSE}"
+  BACKUP_MIN_INTERVAL_MINUTES=0
+  ENABLE_RCON=FALSE
+  if create_backup "paper-migration"; then
+    date -u +%Y%m%dT%H%M%SZ > "${marker}"
+  else
+    log "backup" "Paper/Purpur migration backup failed; continuing with Paper's own startup safety warning"
+  fi
+  BACKUP_MIN_INTERVAL_MINUTES="${previous_min_interval}"
+  ENABLE_RCON="${previous_enable_rcon}"
+}
+
+plugin_preset_urls() {
+  local preset="$1"
+  case "${preset}" in
+    MANUAL|NONE|"")
+      ;;
+    BEDROCK_GEYSER)
+      printf '%s\n%s\n' \
+        "https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest/downloads/spigot" \
+        "https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest/downloads/spigot"
+      ;;
+    TPA_ESSENTIALSX)
+      printf 'essentialsx\n'
+      ;;
+    PERMISSIONS_LUCKPERMS)
+      printf 'luckperms\n'
+      ;;
+    VOICE_CHAT)
+      printf 'simple-voice-chat\n'
+      ;;
+    MAP_BLUEMAP)
+      printf 'bluemap\n'
+      ;;
+    FAMILY_STARTER)
+      printf '%s\n%s\n%s\n%s\n' \
+        "essentialsx" \
+        "luckperms" \
+        "https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest/downloads/spigot" \
+        "https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest/downloads/spigot"
+      ;;
+    *)
+      fail "Unknown plugin_preset: ${preset}"
+      ;;
+  esac
+}
+
+resolve_modrinth_plugin_url() {
+  local slug="$1"
+  local version="$2"
+  local api_url encoded_versions result
+
+  encoded_versions="$(jq -rn --arg v "${version}" '$v | @uri')"
+  api_url="https://api.modrinth.com/v2/project/${slug}/version?loaders=%5B%22paper%22,%22spigot%22,%22bukkit%22%5D&game_versions=%5B%22${encoded_versions}%22%5D"
+  result="$(curl -fsSL "${api_url}" | jq -r 'if type == "array" and length > 0 then (.[0].files // [])[] | select(.primary == true) | .url else empty end' | head -n 1)"
+
+  if [[ -z "${result}" || "${result}" == "null" ]]; then
+    api_url="https://api.modrinth.com/v2/project/${slug}/version?loaders=%5B%22paper%22,%22spigot%22,%22bukkit%22%5D"
+    result="$(curl -fsSL "${api_url}" | jq -r 'if type == "array" and length > 0 then (.[0].files // [])[] | select(.primary == true) | .url else empty end' | head -n 1)"
+  fi
+
+  [[ -n "${result}" && "${result}" != "null" ]] || return 1
+  printf '%s\n' "${result}"
+}
+
+build_plugin_list() {
+  local preset="$1"
+  local custom_slugs="$2"
+  local custom_urls="$3"
+  local version="$4"
+  local raw_entries slug url
+
+  raw_entries="$(combine_lines "$(plugin_preset_urls "${preset}")" "${custom_slugs}")"
+
+  while IFS= read -r slug; do
+    slug="$(sanitize_plugin_slug "${slug}")"
+    [[ -z "${slug}" ]] && continue
+    if [[ "${slug}" =~ ^https?:// ]]; then
+      printf '%s\n' "${slug}"
+    else
+      url="$(resolve_modrinth_plugin_url "${slug}" "${version}")" || {
+        log "plugins" "Could not resolve Modrinth plugin '${slug}' for ${version}; skipping" >&2
+        continue
+      }
+      printf '%s\n' "${url}"
+    fi
+  done <<< "${raw_entries}"
+
+  [[ -n "${custom_urls}" ]] && printf '%s\n' "${custom_urls}"
+}
+
+resolve_level_name() {
+  local slot="$1"
+  local custom_name="$2"
+  local selected
+
+  case "${slot}" in
+    CUSTOM|"")
+      selected="${custom_name}"
+      ;;
+    WORLD_1)
+      selected="$(opt world_1_name world)"
+      ;;
+    WORLD_2)
+      selected="$(opt world_2_name creative)"
+      ;;
+    WORLD_3)
+      selected="$(opt world_3_name test)"
+      ;;
+    *)
+      fail "Unknown world_slot: ${slot}"
+      ;;
+  esac
+
+  selected="${selected//$'\r'/}"
+  selected="${selected## }"
+  selected="${selected%% }"
+  [[ -n "${selected}" ]] || fail "Selected world name must not be empty"
+  printf '%s\n' "${selected}"
+}
+
+resolve_server_owner() {
+  local slot="$1"
+  local fallback_owner="$2"
+  local selected
+
+  case "${slot}" in
+    WORLD_1)
+      selected="$(opt world_1_owner '')"
+      ;;
+    WORLD_2)
+      selected="$(opt world_2_owner '')"
+      ;;
+    WORLD_3)
+      selected="$(opt world_3_owner '')"
+      ;;
+    CUSTOM|"")
+      selected="${fallback_owner}"
+      ;;
+    *)
+      fail "Unknown world_slot: ${slot}"
+      ;;
+  esac
+
+  selected="${selected//$'\r'/}"
+  selected="${selected## }"
+  selected="${selected%% }"
+  if [[ -n "${selected}" ]]; then
+    printf '%s\n' "${selected}"
+  else
+    printf '%s\n' "${fallback_owner}"
+  fi
+}
+
+resolve_server_name() {
+  local slot="$1"
+  local fallback_name="$2"
+  local selected
+
+  case "${slot}" in
+    WORLD_1)
+      selected="$(opt world_1_server_name '')"
+      ;;
+    WORLD_2)
+      selected="$(opt world_2_server_name '')"
+      ;;
+    WORLD_3)
+      selected="$(opt world_3_server_name '')"
+      ;;
+    CUSTOM|"")
+      selected="${fallback_name}"
+      ;;
+    *)
+      fail "Unknown world_slot: ${slot}"
+      ;;
+  esac
+
+  selected="${selected//$'\r'/}"
+  selected="${selected## }"
+  selected="${selected%% }"
+  if [[ -n "${selected}" ]]; then
+    printf '%s\n' "${selected}"
+  else
+    printf '%s\n' "${fallback_name}"
+  fi
+}
+
+server_is_running() {
+  [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null
+}
+
+control_state() {
+  [[ -r "${CONTROL_STATE_FILE}" ]] || return 0
+  cat "${CONTROL_STATE_FILE}"
+}
+
+playit_is_running() {
+  [[ -n "${PLAYIT_PID}" ]] && kill -0 "${PLAYIT_PID}" 2>/dev/null
+}
+
+handle_playit_log_line() {
+  local line="$1"
+  local address=""
+  log "playit" "${line}"
+  address="$(printf '%s\n' "${line}" | grep -Eio '([A-Za-z0-9-]+\.)+(playit\.gg|ply\.gg|joinmc\.link)(:[0-9]+)?' | head -n 1 || true)"
+  if [[ -n "${address}" ]]; then
+    set_playit_address "${address}"
+  fi
+  if [[ "${line}" == *"tunnel_count=0"* ]]; then
+    set_playit_address ""
+  fi
+}
+
+online_player_count() {
+  local count
+  if ! server_is_running; then
+    printf '0\n'
+    return 0
+  fi
+
+  count="$(
+    MINECRAFT_DATA_DIR="${MC_DATA_DIR}" \
+    MINECRAFT_ADDON_CONFIG="${PERSISTENT_OPTIONS_YAML}" \
+    python3 /usr/local/share/ha-minecraft/home-assistant/minecraft_server_sensor.py 2>/dev/null \
+      | jq -r '.players_online // 0' 2>/dev/null \
+      || printf '999\n'
+  )"
+  [[ "${count}" =~ ^[0-9]+$ ]] || count="999"
+  printf '%s\n' "${count}"
+}
+
+disruptive_action_allowed() {
+  local action="$1"
+  local players
+  [[ "${BLOCK_DISRUPTIVE_ACTIONS_WHEN_PLAYERS_ONLINE}" == "TRUE" ]] || return 0
+  players="$(online_player_count)"
+  if (( players > 0 )); then
+    log "control" "Blocked ${action}; ${players} player(s) online"
+    return 1
+  fi
+  return 0
+}
+
+stop_support_loops() {
+  [[ -n "${BACKUP_LOOP_PID}" ]] && kill "${BACKUP_LOOP_PID}" 2>/dev/null || true
+  [[ -n "${AUTOPAUSE_PID}" ]] && kill "${AUTOPAUSE_PID}" 2>/dev/null || true
+  [[ -n "${PAPER_LEGACY_CLEANUP_PID}" ]] && kill "${PAPER_LEGACY_CLEANUP_PID}" 2>/dev/null || true
+  BACKUP_LOOP_PID=""
+  AUTOPAUSE_PID=""
+  PAPER_LEGACY_CLEANUP_PID=""
+}
+
+backup_loop() {
+  local interval_seconds=$((BACKUP_INTERVAL_HOURS * 3600))
+  while sleep "${interval_seconds}"; do
+    [[ "${STOPPING}" == "TRUE" ]] && break
+    create_backup "scheduled" || true
+  done
+}
+
+autopause_loop() {
+  local empty_since=""
+  while sleep 60; do
+    [[ "${STOPPING}" == "TRUE" ]] && break
+    server_is_running || break
+    local players
+    players="$(online_player_count)"
+    if [[ "${players}" == "0" ]]; then
+      empty_since="${empty_since:-$(date +%s)}"
+      if (( $(date +%s) - empty_since >= AUTOPAUSE_TIMEOUT_SECONDS )); then
+        log "autopause" "No players online for ${AUTOPAUSE_TIMEOUT_SECONDS}s; stopping Minecraft server"
+        write_controller_command "stop"
+        return 0
+      fi
+    else
+      empty_since=""
+    fi
+  done
+}
+
+start_mqtt_exporter() {
+  local enabled="$1"
+  [[ "${enabled}" == "TRUE" ]] || return 0
+  if [[ -z "${MQTT_HOST}" ]]; then
+    log "mqtt" "mqtt_enabled is true but mqtt_host is empty; MQTT discovery disabled"
+    return 0
+  fi
+
+  log "mqtt" "Starting MQTT discovery exporter for ${MQTT_HOST}:${MQTT_PORT}"
+  python3 "${LIB_DIR}/mqtt_discovery.py" \
+    --host "${MQTT_HOST}" \
+    --port "${MQTT_PORT}" \
+    --username "${MQTT_USERNAME}" \
+    --password "${MQTT_PASSWORD}" \
+    --discovery-prefix "${MQTT_DISCOVERY_PREFIX}" \
+    --topic-prefix "${MQTT_TOPIC_PREFIX}" \
+    --interval "${MQTT_STATUS_INTERVAL}" &
+  MQTT_EXPORTER_PID="$!"
+}
+
+start_plugin_browser() {
+  local enabled="$1"
+  [[ "${enabled}" == "TRUE" ]] || return 0
+  log "plugin-browser" "Starting JAR explorer on port 8099"
+  MINECRAFT_DATA_DIR="${MC_DATA_DIR}" \
+    MINECRAFT_PLUGIN_BROWSER_PORT="8099" \
+    python3 "${LIB_DIR}/plugin_browser.py" &
+  PLUGIN_BROWSER_PID="$!"
+}
+
+start_playit_agent() {
+  if [[ "${PLAYIT_ENABLED}" != "TRUE" ]]; then
+    set_playit_state "disabled"
+    set_playit_address ""
+    return 0
+  fi
+  if playit_is_running; then
+    set_playit_state "running"
+    return 0
+  fi
+  if [[ -z "${PLAYIT_SECRET}" ]]; then
+    log "playit" "playit_enabled is true but playit_secret is empty; playit disabled"
+    set_playit_state "error"
+    return 0
+  fi
+  if ! command -v playit >/dev/null 2>&1; then
+    log "playit" "playit binary is not available"
+    set_playit_state "error"
+    return 0
+  fi
+
+  log "playit" "Starting playit.gg agent"
+  set_playit_state "starting"
+  set_playit_address ""
+  playit --secret "${PLAYIT_SECRET}" > >(while IFS= read -r line; do handle_playit_log_line "${line}"; done) 2>&1 &
+  PLAYIT_PID="$!"
+  set_playit_state "running"
+}
+
+stop_playit_agent() {
+  if playit_is_running; then
+    log "playit" "Stopping playit.gg agent"
+    set_playit_state "stopping"
+    kill "${PLAYIT_PID}" 2>/dev/null || true
+    local waited=0
+    while kill -0 "${PLAYIT_PID}" 2>/dev/null; do
+      if (( waited >= 15 )); then
+        kill -KILL "${PLAYIT_PID}" 2>/dev/null || true
+        break
+      fi
+      sleep 1
+      waited=$((waited + 1))
+    done
+    wait "${PLAYIT_PID}" 2>/dev/null || true
+  fi
+  PLAYIT_PID=""
+  if [[ "${PLAYIT_ENABLED}" == "TRUE" ]]; then
+    set_playit_state "stopped"
+  else
+    set_playit_state "disabled"
+  fi
+  set_playit_address ""
+}
+
+restart_playit_agent() {
+  stop_playit_agent
+  start_playit_agent
+}
+
+write_controller_command() {
+  local action="$1"
+  local slot="${2:-}"
+  local now command_file tmp_file
+  now="$(date +%s)-$$-${RANDOM}"
+  mkdir -p "${COMMAND_DIR}"
+  command_file="${COMMAND_DIR}/command-${now}-shell.json"
+  tmp_file="${COMMAND_DIR}/.${now}-shell.tmp"
+  if [[ -n "${slot}" ]]; then
+    jq -cn --arg action "${action}" --arg slot "${slot}" '{action: $action, slot: $slot}' > "${tmp_file}"
+  else
+    jq -cn --arg action "${action}" '{action: $action}' > "${tmp_file}"
+  fi
+  mv "${tmp_file}" "${command_file}"
+}
+
+load_options() {
+  log "init" "Validating configuration"
+  prepare_options_file
+  EULA="$(bool_opt eula false)"
+  SERVER_AUTOSTART="$(bool_opt server_autostart false)"
+  SERVER_TYPE="$(opt server_type PAPER)"
+  MINECRAFT_VERSION="$(opt minecraft_version LATEST)"
+  MEMORY_INITIAL="$(opt memory_initial 2G)"
+  MEMORY_MAX="$(opt memory_max 6G)"
+  ENABLE_RCON="$(bool_opt enable_rcon false)"
+  RCON_PASSWORD="$(opt rcon_password '')"
+  RCON_PORT="$(opt rcon_port 25575)"
+  RCON_MESSAGE_STOP_ANNOUNCEMENT="$(bool_opt rcon_message_stop_announcement true)"
+  RCON_MESSAGE_STOP_SAVE="$(bool_opt rcon_message_stop_save true)"
+  RCON_MESSAGE_BACKUP_SAVE="$(bool_opt rcon_message_backup_save true)"
+  SERVER_PORT="$(opt server_port 25565)"
+  BACKUP_INTERVAL_HOURS="$(opt backup_interval_hours 6)"
+  BACKUP_RETENTION_DAYS="$(opt backup_retention_days 14)"
+  BACKUP_KEEP_LAST="$(opt backup_keep_last 10)"
+  BACKUP_MIN_INTERVAL_MINUTES="$(opt backup_min_interval_minutes 30)"
+  BACKUP_ON_SHUTDOWN="$(bool_opt backup_on_shutdown false)"
+  BACKUP_ON_WORLD_SWITCH="$(bool_opt backup_on_world_switch false)"
+  BACKUP_ON_START="$(bool_opt backup_on_start false)"
+  ENABLE_AUTO_BACKUP="$(bool_opt enable_auto_backup false)"
+  ENABLE_AUTOPAUSE="$(bool_opt enable_autopause false)"
+  IDLE_SHUTDOWN_MINUTES="$(opt idle_shutdown_minutes '')"
+  if [[ "${IDLE_SHUTDOWN_MINUTES}" =~ ^[0-9]+$ ]]; then
+    AUTOPAUSE_TIMEOUT_SECONDS=$((IDLE_SHUTDOWN_MINUTES * 60))
+  else
+    AUTOPAUSE_TIMEOUT_SECONDS="$(opt autopause_timeout_seconds 1800)"
+  fi
+  STOP_GRACE_PERIOD_SECONDS="$(opt stop_grace_period_seconds 120)"
+  PLUGINS_ENABLED="$(bool_opt plugins_enabled false)"
+  PLUGIN_PRESET="$(opt plugin_preset MANUAL)"
+  BEDROCK_ENABLED="$(bool_opt bedrock_enabled false)"
+  BEDROCK_PORT="$(opt bedrock_port 19132)"
+  if [[ ! "${BEDROCK_PORT}" =~ ^[0-9]+$ || "${BEDROCK_PORT}" -lt 1 || "${BEDROCK_PORT}" -gt 65535 ]]; then
+    fail "bedrock_port must be a valid UDP port"
+  fi
+  PLUGIN_BROWSER_ENABLED="$(bool_opt plugin_browser_enabled true)"
+  SECURITY_ENABLED="$(bool_opt security_enabled true)"
+  ANTI_XRAY_ENABLED="$(bool_opt anti_xray_enabled true)"
+  GRIM_ENABLED="$(bool_opt grim_enabled true)"
+  BLOCK_DISRUPTIVE_ACTIONS_WHEN_PLAYERS_ONLINE="$(bool_opt block_disruptive_actions_when_players_online true)"
+  MQTT_ENABLED="$(bool_opt mqtt_enabled false)"
+  MQTT_HOST="$(opt mqtt_host core-mosquitto)"
+  MQTT_PORT="$(opt mqtt_port 1883)"
+  MQTT_USERNAME="$(opt mqtt_username '')"
+  MQTT_PASSWORD="$(opt mqtt_password '')"
+  MQTT_DISCOVERY_PREFIX="$(opt mqtt_discovery_prefix homeassistant)"
+  MQTT_TOPIC_PREFIX="$(opt mqtt_topic_prefix minecraft_java)"
+  MQTT_STATUS_INTERVAL="$(opt mqtt_status_interval 30)"
+  PLAYIT_ENABLED="$(bool_opt playit_enabled false)"
+  PLAYIT_SECRET="$(opt playit_secret '')"
+  WORLD_SLOT="$(opt world_slot CUSTOM)"
+  ALLOW_CREATE_WORLDS="$(bool_opt allow_create_worlds true)"
+}
+
+configure_server_environment() {
+  [[ "${EULA}" == "TRUE" ]] || fail "Minecraft EULA must be accepted in the add-on options before the server can start"
+  validate_memory_pair "${MEMORY_INITIAL}" "${MEMORY_MAX}"
+  ensure_rcon_password "${ENABLE_RCON}" "${RCON_PASSWORD}"
+
+  prepare_data_dir
+  run_migration
+  LEVEL_NAME="$(resolve_level_name "${WORLD_SLOT}" "$(opt level_name world)")"
+  if CANONICAL_LEVEL_NAME="$(canonical_media_world_name "${LEVEL_NAME}")"; then
+    if [[ "${CANONICAL_LEVEL_NAME}" != "${LEVEL_NAME}" ]]; then
+      log "init" "Using existing world '${CANONICAL_LEVEL_NAME}' for configured name '${LEVEL_NAME}'"
+      LEVEL_NAME="${CANONICAL_LEVEL_NAME}"
+    fi
+  fi
+  link_data_storage "${LEVEL_NAME}" "${SERVER_TYPE}" "${ALLOW_CREATE_WORLDS}"
+
+  export EULA="TRUE"
+  export TYPE="${SERVER_TYPE}"
+  export VERSION="${MINECRAFT_VERSION}"
+  export INIT_MEMORY="${MEMORY_INITIAL}"
+  export MAX_MEMORY="${MEMORY_MAX}"
+  export MEMORY=""
+  export SERVER_NAME="$(resolve_server_name "${WORLD_SLOT}" "$(opt server_name Familienserver)")"
+  export MOTD="$(opt motd 'Willkommen auf unserem Minecraft-Server')"
+  export LEVEL="${LEVEL_NAME}"
+  export SEED="$(opt level_seed '')"
+  export MODE="$(opt gamemode survival)"
+  export DIFFICULTY="$(opt difficulty normal)"
+  export HARDCORE="$(bool_opt hardcore false)"
+  export PVP="$(bool_opt pvp true)"
+  export ONLINE_MODE="$(bool_opt online_mode true)"
+  export MAX_PLAYERS="$(opt max_players 10)"
+  export VIEW_DISTANCE="$(opt view_distance 10)"
+  export SIMULATION_DISTANCE="$(opt simulation_distance 8)"
+  export SPAWN_PROTECTION="$(opt spawn_protection 0)"
+  export ALLOW_NETHER="$(bool_opt allow_nether true)"
+  export ENABLE_COMMAND_BLOCK="$(bool_opt enable_command_block false)"
+  export FORCE_GAMEMODE="$(bool_opt force_gamemode false)"
+  export ENABLE_WHITELIST="$(bool_opt white_list_enabled false)"
+  export WHITELIST="$(opt whitelist '')"
+  SERVER_OWNER="$(resolve_server_owner "${WORLD_SLOT}" "$(opt server_owner '')")"
+  export OPS="$(combine_csv "${SERVER_OWNER}" "$(opt ops '')")"
+  if [[ "${PLUGINS_ENABLED}" == "TRUE" || -n "$(opt modrinth_plugins '')" || -n "$(opt plugin_urls '')" ]]; then
+    if [[ "${SERVER_TYPE}" == "VANILLA" ]]; then
+      log "plugins" "Plugins are only supported with PAPER or PURPUR; ignoring plugin options for VANILLA"
+      export PLUGINS=""
+    else
+      export PLUGINS="$(build_plugin_list "${PLUGIN_PRESET}" "$(opt modrinth_plugins '')" "$(opt plugin_urls '')" "${MINECRAFT_VERSION}")"
+      export REMOVE_OLD_MODS="$(bool_opt remove_old_plugins false)"
+    fi
+  else
+    export PLUGINS=""
+  fi
+  export ENFORCE_WHITELIST="$(bool_opt enforce_whitelist false)"
+  export ALLOW_FLIGHT="$(bool_opt allow_flight false)"
+  export ENABLE_RCON="${ENABLE_RCON}"
+  export RCON_PASSWORD="${RCON_PASSWORD}"
+  export RCON_PORT="${RCON_PORT}"
+  export RCON_MESSAGE_BACKUP_SAVE="${RCON_MESSAGE_BACKUP_SAVE}"
+  export SERVER_PORT="${SERVER_PORT}"
+  export TZ="$(opt timezone Europe/Berlin)"
+  export JVM_OPTS="$(opt java_tool_options '')"
+  if [[ "${SERVER_TYPE}" == "PAPER" || "${SERVER_TYPE}" == "PURPUR" ]]; then
+    export JVM_OPTS="$(ensure_jvm_system_property "${JVM_OPTS}" "paper.disableMigrationDelay")"
+  fi
+  export EXTRA_ARGS="$(opt extra_server_options '')"
+  export USE_AIKAR_FLAGS="TRUE"
+  if [[ "${SERVER_TYPE}" == "VANILLA" ]]; then
+    export RUNTIME_WORLD_LEVEL="${LEVEL_NAME}"
+  else
+    export RUNTIME_WORLD_LEVEL=""
+  fi
+
+  log "init" "Using server type ${SERVER_TYPE}"
+  log "init" "Using Minecraft version ${MINECRAFT_VERSION}"
+  log "init" "Using world slot ${WORLD_SLOT}: ${LEVEL_NAME}"
+  log "init" "Using server name ${SERVER_NAME}"
+  [[ -n "${SERVER_OWNER}" ]] && log "init" "Server owner configured for ${WORLD_SLOT}"
+  log "init" "Java heap: Xms=${MEMORY_INITIAL}, Xmx=${MEMORY_MAX}"
+}
+
+prepare_bedrock_support() {
+  if [[ "${BEDROCK_ENABLED}" == "TRUE" ]]; then
+    if [[ "${SERVER_TYPE}" == "VANILLA" ]]; then
+      fail "bedrock_enabled requires PAPER or PURPUR because Geyser-Spigot and Floodgate are plugins"
+    fi
+    python3 "${LIB_DIR}/bedrock.py" prepare \
+      --data-dir "${MC_DATA_DIR}" \
+      --port "${BEDROCK_PORT}" \
+      --status-file "${BEDROCK_STATUS_FILE}"
+  else
+    python3 "${LIB_DIR}/bedrock.py" disable \
+      --data-dir "${MC_DATA_DIR}" \
+      --status-file "${BEDROCK_STATUS_FILE}" || true
+  fi
+}
+
+prepare_security_support() {
+  if [[ "${SERVER_TYPE}" == "VANILLA" && "${SECURITY_ENABLED}" == "TRUE" && "${GRIM_ENABLED}" == "TRUE" ]]; then
+    log "security" "Grim requires PAPER or PURPUR; Grim will remain inactive for VANILLA"
+  fi
+  python3 "${LIB_DIR}/security.py" prepare \
+    --data-dir "${MC_DATA_DIR}" \
+    --options-file "${OPTIONS_FILE}" \
+    --status-file "${SECURITY_STATUS_FILE}" || {
+      log "security" "Security preparation failed; continuing with last known server state"
+      return 0
+    }
+}
+
+prepare_connection_throttle() {
+  [[ "${SERVER_TYPE}" == "PAPER" || "${SERVER_TYPE}" == "PURPUR" ]] || return 0
+  local message
+  if message="$(python3 - "${MC_DATA_DIR}/bukkit.yml" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+path = Path(sys.argv[1])
+data = {}
+if path.is_file():
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = loaded if isinstance(loaded, dict) else {}
+    except Exception as exc:
+        print(f"Could not read bukkit.yml for connection-throttle fix: {exc}")
+        sys.exit(0)
+
+settings = data.get("settings")
+if not isinstance(settings, dict):
+    settings = {}
+    data["settings"] = settings
+
+previous = settings.get("connection-throttle")
+if str(previous) == "-1":
+    sys.exit(0)
+
+settings["connection-throttle"] = -1
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(yaml.safe_dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False), encoding="utf-8")
+print(f"Set bukkit.yml settings.connection-throttle from {previous if previous is not None else 'unset'} to -1")
+PY
+)"; then
+    [[ -n "${message}" ]] && log "init" "${message}"
+    return 0
+  else
+    log "init" "Could not update bukkit.yml connection-throttle; continuing"
+  fi
+}
+
+schedule_bedrock_post_start_check() {
+  [[ "${BEDROCK_ENABLED}" == "TRUE" ]] || return 0
+  python3 "${LIB_DIR}/bedrock.py" check \
+    --data-dir "${MC_DATA_DIR}" \
+    --port "${BEDROCK_PORT}" \
+    --status-file "${BEDROCK_STATUS_FILE}" \
+    --delay 45 &
+}
+
+poll_security_runtime() {
+  local now
+  server_is_running || return 0
+  [[ "${SECURITY_ENABLED:-TRUE}" == "TRUE" ]] || return 0
+  now="$(date +%s)"
+  if (( now - SECURITY_LAST_POLL < SECURITY_POLL_INTERVAL_SECONDS )); then
+    return 0
+  fi
+  SECURITY_LAST_POLL="${now}"
+  python3 "${LIB_DIR}/security.py" status \
+    --data-dir "${MC_DATA_DIR}" \
+    --options-file "${OPTIONS_FILE}" \
+    --status-file "${SECURITY_STATUS_FILE}" \
+    --runtime-summary >/dev/null || \
+    log "security" "Runtime security poll failed"
+}
+
+start_support_loops() {
+  if [[ "${ENABLE_AUTO_BACKUP}" == "TRUE" ]]; then
+    backup_loop &
+    BACKUP_LOOP_PID="$!"
+  fi
+
+  if [[ "${ENABLE_AUTOPAUSE}" == "TRUE" ]]; then
+    log "autopause" "Idle shutdown enabled after ${AUTOPAUSE_TIMEOUT_SECONDS}s without players"
+    autopause_loop &
+    AUTOPAUSE_PID="$!"
+  fi
+}
+
+paper_legacy_dimension_cleanup_loop() {
+  local attempts=0
+  [[ "${SERVER_TYPE}" == "PAPER" || "${SERVER_TYPE}" == "PURPUR" ]] || return 0
+  [[ -n "${LEVEL_NAME}" ]] || return 0
+
+  while server_is_running && (( attempts < 120 )); do
+    if [[ ! -e "/data/${LEVEL_NAME}_nether" && ! -e "/data/${LEVEL_NAME}_the_end" ]]; then
+      quarantine_migrated_paper_legacy_dimensions "${LEVEL_NAME}" || true
+      fix_media_permissions
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 1
+  done
+}
+
+remove_corrupt_server_jars() {
+  local jar
+  shopt -s nullglob
+  case "${SERVER_TYPE}" in
+    PURPUR)
+      for jar in /data/purpur-*.jar; do
+        if ! valid_server_jar "${jar}"; then
+          log "init" "Removing corrupt Purpur server jar ${jar}; it will be downloaded again"
+          rm -f "${jar}"
+        fi
+      done
+      ;;
+    PAPER)
+      for jar in /data/paper-*.jar /data/server.jar; do
+        [[ -e "${jar}" ]] || continue
+        if ! valid_server_jar "${jar}"; then
+          log "init" "Removing corrupt Paper server jar ${jar}; it will be downloaded again"
+          rm -f "${jar}"
+        fi
+      done
+      ;;
+    VANILLA)
+      for jar in /data/minecraft_server*.jar /data/server.jar; do
+        [[ -e "${jar}" ]] || continue
+        if ! valid_server_jar "${jar}"; then
+          log "init" "Removing corrupt Vanilla server jar ${jar}; it will be downloaded again"
+          rm -f "${jar}"
+        fi
+      done
+      ;;
+  esac
+  shopt -u nullglob
+}
+
+valid_server_jar() {
+  python3 - "$1" <<'PY'
+import sys
+import zipfile
+
+path = sys.argv[1]
+sys.exit(0 if zipfile.is_zipfile(path) else 1)
+PY
+}
+
+start_server() {
+  if server_is_running; then
+    if [[ "$(control_state)" == "starting" ]]; then
+      log "control" "Minecraft server start is already in progress"
+    else
+      log "control" "Minecraft server process is already active"
+    fi
+    return 0
+  fi
+
+  set_control_state "starting"
+  load_options
+  configure_server_environment
+  cd "${MC_DATA_DIR}"
+
+  maybe_backup_before_paper_world_migration
+
+  if [[ "${BACKUP_ON_START}" == "TRUE" ]]; then
+    create_backup "startup" || log "backup" "Startup backup failed"
+  fi
+
+  log "init" "Starting Minecraft server"
+  prepare_connection_throttle
+  prepare_bedrock_support
+  prepare_security_support
+  remove_corrupt_server_jars
+  /start &
+  SERVER_PID="$!"
+  schedule_bedrock_post_start_check
+  start_support_loops
+  paper_legacy_dimension_cleanup_loop &
+  PAPER_LEGACY_CLEANUP_PID="$!"
+}
+
+stop_server() {
+  local reason="${1:-manual}"
+  if ! server_is_running; then
+    log "control" "Minecraft server is already stopped"
+    SERVER_PID=""
+    stop_support_loops
+    set_control_state "stopped"
+    return 0
+  fi
+
+  set_control_state "stopping"
+  load_options
+  log "shutdown" "Stopping Minecraft server (${reason})"
+  stop_support_loops
+
+  if [[ "${ENABLE_RCON}" == "TRUE" && "${RCON_MESSAGE_STOP_ANNOUNCEMENT}" == "TRUE" ]]; then
+    rcon_cmd "say Server is stopping" || true
+  fi
+  if [[ "${ENABLE_RCON}" == "TRUE" && "${RCON_MESSAGE_STOP_SAVE}" == "TRUE" ]]; then
+    log "shutdown" "Saving world"
+    rcon_cmd "save-all flush" || true
+  fi
+
+  if [[ "${ENABLE_RCON}" == "TRUE" ]]; then
+    rcon_cmd "stop" || kill -TERM "${SERVER_PID}" 2>/dev/null || true
+  else
+    kill -TERM "${SERVER_PID}" 2>/dev/null || true
+  fi
+
+  local waited=0
+  while kill -0 "${SERVER_PID}" 2>/dev/null; do
+    if (( waited >= STOP_GRACE_PERIOD_SECONDS )); then
+      log "shutdown" "Grace period exceeded; killing server process"
+      kill -KILL "${SERVER_PID}" 2>/dev/null || true
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  wait "${SERVER_PID}" 2>/dev/null || true
+  SERVER_PID=""
+  log "shutdown" "Server stopped cleanly"
+  set_control_state "stopped"
+  [[ "${SERVER_TYPE}" == "VANILLA" && -n "${LEVEL_NAME}" ]] && sync_world_to_media "${LEVEL_NAME}"
+
+  if [[ "${BACKUP_ON_SHUTDOWN}" == "TRUE" ]]; then
+    if [[ "${reason}" == "world-switch" && "${BACKUP_ON_WORLD_SWITCH}" != "TRUE" ]]; then
+      log "backup" "Skipping shutdown backup during world switch"
+      return 0
+    fi
+    local previous_rcon="${ENABLE_RCON}"
+    ENABLE_RCON="FALSE"
+    create_backup "shutdown" || log "shutdown" "Shutdown backup failed"
+    ENABLE_RCON="${previous_rcon}"
+  fi
+}
+
+restart_server() {
+  local reason="${1:-manual}"
+  load_options
+  disruptive_action_allowed "restart" || return 0
+  stop_server "${reason}"
+  start_server
+}
+
+switch_world() {
+  local slot="$1"
+  case "${slot}" in
+    CUSTOM|WORLD_1|WORLD_2|WORLD_3)
+      ;;
+    *)
+      log "control" "Ignoring invalid world slot command: ${slot}"
+      return 0
+      ;;
+  esac
+  load_options
+  disruptive_action_allowed "world switch" || return 0
+  mkdir -p "$(dirname "${DASHBOARD_COMMAND_YAML}")"
+  printf 'world_slot: %s\n' "${slot}" > "${DASHBOARD_COMMAND_YAML}"
+  log "control" "Switching Minecraft world slot to ${slot}"
+  load_options
+  restart_server "world-switch"
+}
+
+process_controller_commands() {
+  local command_file action slot backup
+  mkdir -p "${COMMAND_DIR}"
+  for command_file in "${COMMAND_DIR}"/*.json; do
+    [[ -e "${command_file}" ]] || return 0
+    action="$(jq -r '.action // ""' "${command_file}" 2>/dev/null || true)"
+    slot="$(jq -r '.slot // ""' "${command_file}" 2>/dev/null || true)"
+    backup="$(jq -r '.backup // ""' "${command_file}" 2>/dev/null || true)"
+    rm -f "${command_file}"
+    case "${action}" in
+      start)
+        start_server
+        ;;
+      stop)
+        stop_server "manual"
+        ;;
+      restart)
+        restart_server "manual"
+        ;;
+      world_slot)
+        switch_world "${slot}"
+        ;;
+      backup_now)
+        load_options
+        create_backup "${slot:+manual-${slot}}" "true" || log "backup" "Manual backup failed"
+        ;;
+      restore_backup)
+        load_options
+        stop_server "restore"
+        restore_backup "${backup}" || log "backup" "Restore failed"
+        load_options
+        ;;
+      playit_start)
+        load_options
+        if [[ "${PLAYIT_ENABLED}" == "TRUE" ]]; then
+          start_playit_agent
+        else
+          log "playit" "Ignoring playit start command because playit_enabled is false"
+          set_playit_state "disabled"
+        fi
+        ;;
+      playit_stop)
+        stop_playit_agent
+        ;;
+      playit_restart)
+        load_options
+        if [[ "${PLAYIT_ENABLED}" == "TRUE" ]]; then
+          restart_playit_agent
+        else
+          log "playit" "Ignoring playit restart command because playit_enabled is false"
+          set_playit_state "disabled"
+        fi
+        ;;
+      *)
+        log "control" "Ignoring unknown controller command: ${action}"
+        ;;
+    esac
+  done
+}
+
+reap_playit_if_exited() {
+  local exit_code
+  [[ -n "${PLAYIT_PID}" ]] || return 0
+  if kill -0 "${PLAYIT_PID}" 2>/dev/null; then
+    return 0
+  fi
+  set +e
+  wait "${PLAYIT_PID}"
+  exit_code="$?"
+  set -e
+  PLAYIT_PID=""
+  if [[ "${PLAYIT_ENABLED}" == "TRUE" ]]; then
+    set_playit_state "error"
+  else
+    set_playit_state "disabled"
+  fi
+  log "playit" "playit.gg agent exited with code ${exit_code}"
+}
+
+clear_controller_commands() {
+  mkdir -p "${COMMAND_DIR}"
+  find "${COMMAND_DIR}" -maxdepth 1 -type f -name '*.json' -delete 2>/dev/null || true
+}
+
+reap_server_if_exited() {
+  local exit_code
+  [[ -n "${SERVER_PID}" ]] || return 0
+  if kill -0 "${SERVER_PID}" 2>/dev/null; then
+    return 0
+  fi
+  set +e
+  wait "${SERVER_PID}"
+  exit_code="$?"
+  set -e
+  SERVER_PID=""
+  stop_support_loops
+  set_control_state "stopped"
+  [[ "${STOPPING}" == "TRUE" ]] || log "init" "Minecraft server exited with code ${exit_code}; controller remains running"
+}
+
+shutdown_controller() {
+  [[ "${STOPPING}" == "TRUE" ]] && return 0
+  STOPPING="TRUE"
+  stop_server "addon-stop"
+  stop_playit_agent
+  [[ -n "${MQTT_EXPORTER_PID}" ]] && kill "${MQTT_EXPORTER_PID}" 2>/dev/null || true
+  [[ -n "${PLUGIN_BROWSER_PID}" ]] && kill "${PLUGIN_BROWSER_PID}" 2>/dev/null || true
+}
+
+trap 'shutdown_controller; exit 0' TERM INT
+
+load_options
+log "control" "Minecraft autostart: ${SERVER_AUTOSTART}"
+log "control" "Backup on shutdown: ${BACKUP_ON_SHUTDOWN}"
+log "control" "Auto backup: ${ENABLE_AUTO_BACKUP}"
+clear_controller_commands
+set_control_state "stopped"
+start_plugin_browser "${PLUGIN_BROWSER_ENABLED}"
+start_mqtt_exporter "${MQTT_ENABLED}"
+set_playit_state "stopped"
+set_playit_address ""
+if [[ "${SERVER_AUTOSTART}" == "TRUE" ]]; then
+  start_server
+else
+  log "control" "Controller is running; Minecraft autostart is disabled"
+fi
+touch "${READY_FILE}"
+log "control" "Controller ready"
+
+while true; do
+  process_controller_commands
+  reap_server_if_exited
+  reap_playit_if_exited
+  poll_security_runtime
+  sleep 1
+done

@@ -1,0 +1,226 @@
+name: Minecraft Java Server
+version: "0.6.25"
+slug: minecraft_java
+description: Paper, Purpur, or Vanilla Minecraft Java server for Home Assistant OS
+url: https://github.com/local/minecraftserver-hassos/tree/main/minecraft-java
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: services
+boot: manual
+host_network: false
+hassio_api: true
+hassio_role: manager
+ingress: true
+ingress_port: 8099
+panel_admin: false
+panel_icon: mdi:minecraft
+panel_title: Minecraft Server
+map:
+  - media:rw
+  - type: addon_config
+    read_only: false
+    path: /ha-addon-config
+ports:
+  25565/tcp: 25565
+  19132/udp: 19132
+ports_description:
+  25565/tcp: Minecraft Java Edition
+  19132/udp: Minecraft Bedrock Edition via Geyser
+options:
+  eula: false
+  server_autostart: false
+  server_type: PAPER
+  minecraft_version: LATEST
+  memory_initial: 2G
+  memory_max: 6G
+  server_name: Familienserver
+  server_owner: ""
+  motd: Willkommen auf unserem Minecraft-Server
+  world_slot: CUSTOM
+  world_1_name: world
+  world_1_server_name: ""
+  world_1_owner: ""
+  world_2_name: creative
+  world_2_server_name: ""
+  world_2_owner: ""
+  world_3_name: test
+  world_3_server_name: ""
+  world_3_owner: ""
+  level_name: world
+  allow_create_worlds: true
+  gamemode: survival
+  difficulty: normal
+  max_players: 10
+  block_disruptive_actions_when_players_online: true
+  enable_autopause: false
+  idle_shutdown_minutes: 30
+  white_list_enabled: false
+  whitelist: ""
+  ops: ""
+  bedrock_enabled: false
+  bedrock_port: 19132
+  security_enabled: true
+  anti_xray_enabled: true
+  anti_xray_engine_mode: 2
+  anti_xray_manage_defaults: true
+  anti_xray_manage_nether: true
+  anti_xray_manage_end: false
+  grim_enabled: true
+  grim_auto_update: true
+  grim_auto_compatible_beta: true
+  grim_update_channel: stable
+  grim_punishments_managed: true
+  grim_public_alerts: true
+  grim_public_alert_threshold: 8
+  grim_public_alert_interval: 8
+  grim_kick_enabled: true
+  grim_kick_threshold: 15
+  grim_event_log_enabled: true
+  grim_event_log_max_entries: 500
+  xray_suspicion_enabled: true
+  xray_suspicion_alert_threshold: 120
+  xray_suspicion_window_minutes: 20
+  xray_suspicion_rcon_alerts: true
+  xray_suspicion_alert_cooldown_seconds: 300
+  xray_suspicion_rcon_save_before_scan: true
+  plugins_enabled: false
+  plugin_preset: MANUAL
+  modrinth_plugins: ""
+  plugin_urls: ""
+  plugin_browser_enabled: true
+  ingress_admin_password: ""
+  ingress_admin_users: ""
+  mqtt_enabled: false
+  mqtt_host: core-mosquitto
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
+  mqtt_discovery_prefix: homeassistant
+  mqtt_topic_prefix: minecraft_java
+  mqtt_status_interval: 30
+  playit_enabled: false
+  playit_secret: ""
+  playit_public_address: ""
+  enable_rcon: false
+  rcon_password: ""
+  rcon_message_stop_announcement: true
+  rcon_message_stop_save: true
+  rcon_message_backup_save: true
+  enable_auto_backup: false
+  backup_on_shutdown: false
+  backup_on_world_switch: false
+  backup_on_start: false
+  backup_interval_hours: 6
+  backup_retention_days: 14
+  backup_min_interval_minutes: 30
+  backup_keep_last: 10
+schema:
+  eula: bool
+  server_autostart: bool?
+  server_type: list(PAPER|PURPUR|VANILLA)
+  minecraft_version: str
+  memory_initial: str
+  memory_max: str
+  server_name: str
+  server_owner: str?
+  motd: str
+  world_slot: list(CUSTOM|WORLD_1|WORLD_2|WORLD_3)
+  world_1_name: str
+  world_1_server_name: str?
+  world_1_owner: str?
+  world_2_name: str
+  world_2_server_name: str?
+  world_2_owner: str?
+  world_3_name: str
+  world_3_server_name: str?
+  world_3_owner: str?
+  level_name: str
+  allow_create_worlds: bool
+  level_seed: str?
+  gamemode: list(survival|creative|adventure|spectator)
+  difficulty: list(peaceful|easy|normal|hard)
+  hardcore: bool?
+  pvp: bool?
+  online_mode: bool?
+  max_players: int(1,100)
+  block_disruptive_actions_when_players_online: bool?
+  view_distance: int(2,32)?
+  simulation_distance: int(2,32)?
+  spawn_protection: int(0,100)?
+  allow_nether: bool?
+  enable_command_block: bool?
+  force_gamemode: bool?
+  white_list_enabled: bool
+  whitelist: str?
+  ops: str?
+  bedrock_enabled: bool
+  bedrock_port: int(1,65535)
+  security_enabled: bool
+  anti_xray_enabled: bool
+  anti_xray_engine_mode: list(1|2|3)
+  anti_xray_manage_defaults: bool
+  anti_xray_manage_nether: bool
+  anti_xray_manage_end: bool
+  grim_enabled: bool
+  grim_auto_update: bool
+  grim_auto_compatible_beta: bool
+  grim_update_channel: list(stable|beta)
+  grim_punishments_managed: bool
+  grim_public_alerts: bool
+  grim_public_alert_threshold: int(1,)
+  grim_public_alert_interval: int(1,)
+  grim_kick_enabled: bool
+  grim_kick_threshold: int(1,)
+  grim_event_log_enabled: bool
+  grim_event_log_max_entries: int(50,5000)
+  xray_suspicion_enabled: bool
+  xray_suspicion_alert_threshold: int(10,500)
+  xray_suspicion_window_minutes: int(5,240)
+  xray_suspicion_rcon_alerts: bool
+  xray_suspicion_alert_cooldown_seconds: int(30,3600)
+  xray_suspicion_rcon_save_before_scan: bool
+  plugins_enabled: bool
+  plugin_preset: list(MANUAL|NONE|BEDROCK_GEYSER|TPA_ESSENTIALSX|FAMILY_STARTER|VOICE_CHAT|MAP_BLUEMAP|PERMISSIONS_LUCKPERMS)
+  modrinth_plugins: str?
+  plugin_urls: str?
+  plugin_browser_enabled: bool?
+  ingress_admin_password: password?
+  ingress_admin_users: str?
+  mqtt_enabled: bool
+  mqtt_host: str?
+  mqtt_port: int(1,65535)?
+  mqtt_username: str?
+  mqtt_password: password?
+  mqtt_discovery_prefix: str?
+  mqtt_topic_prefix: str?
+  mqtt_status_interval: int(5,3600)?
+  playit_enabled: bool?
+  playit_secret: password?
+  playit_public_address: str?
+  remove_old_plugins: bool?
+  enforce_whitelist: bool?
+  allow_flight: bool?
+  enable_rcon: bool
+  rcon_password: password?
+  rcon_port: int(1,65535)?
+  rcon_message_stop_announcement: bool?
+  rcon_message_stop_save: bool?
+  rcon_message_backup_save: bool?
+  server_port: int(1,65535)?
+  timezone: str?
+  java_tool_options: str?
+  extra_server_options: str?
+  enable_autopause: bool?
+  autopause_timeout_seconds: int(60,86400)?
+  enable_auto_backup: bool
+  backup_interval_hours: int(1,168)?
+  backup_retention_days: int(1,365)?
+  backup_min_interval_minutes: int(0,1440)?
+  backup_keep_last: int(0,500)?
+  backup_on_shutdown: bool
+  backup_on_world_switch: bool?
+  backup_on_start: bool?
+  stop_grace_period_seconds: int(30,600)?
+  idle_shutdown_minutes: int(1,1440)?

@@ -1,0 +1,254 @@
+command_line:
+  - sensor:
+      name: Minecraft Addon Config
+      unique_id: minecraft_addon_config
+      command: "python3 /config/minecraft_addon_config_sensor.py"
+      scan_interval: 30
+      value_template: "{{ value_json.active_slot }}"
+      json_attributes:
+        - config_path
+        - active_slot
+        - active_world
+        - active_server_name
+        - active_owner
+        - level_name
+        - server_name
+        - server_owner
+        - world_1_name
+        - world_1_server_name
+        - world_1_owner
+        - world_2_name
+        - world_2_server_name
+        - world_2_owner
+        - world_3_name
+        - world_3_server_name
+        - world_3_owner
+        - bedrock_enabled
+        - bedrock_port
+  - sensor:
+      name: Minecraft Server Status
+      unique_id: minecraft_server_status
+      command: "python3 /config/minecraft_server_sensor.py"
+      scan_interval: 30
+      value_template: "{{ 'online' if value_json.online else 'offline' }}"
+      json_attributes:
+        - online
+        - host
+        - port
+        - latency_ms
+        - minecraft_version
+        - protocol
+        - players_online
+        - players_java
+        - players_bedrock
+        - players
+        - players_max
+        - player_sample
+        - bedrock_enabled
+        - bedrock_state
+        - bedrock_port
+        - geyser_status
+        - floodgate_status
+        - bedrock_auth
+        - bedrock_message
+        - motd
+        - active_world
+        - world_exists
+        - worlds
+        - world_count
+        - plugin_count
+        - log_count
+        - backup_count
+        - latest_backup
+        - latest_backup_path
+        - latest_backup_mtime
+        - backup_total_mb
+        - data_dir
+        - config_path
+        - server_type
+        - configured_version
+        - error
+
+template:
+  - binary_sensor:
+      - name: Minecraft Server Online
+        unique_id: minecraft_server_online
+        state: "{{ is_state('sensor.minecraft_server_status', 'online') }}"
+        device_class: connectivity
+        icon: mdi:minecraft
+
+  - sensor:
+      - name: Minecraft Players Online
+        unique_id: minecraft_players_online
+        state: "{{ state_attr('sensor.minecraft_server_status', 'players_online') | int(0) }}"
+        icon: mdi:account-group
+        unit_of_measurement: players
+
+      - name: Minecraft Players Max
+        unique_id: minecraft_players_max
+        state: "{{ state_attr('sensor.minecraft_server_status', 'players_max') | int(0) }}"
+        icon: mdi:account-multiple-plus
+        unit_of_measurement: players
+
+      - name: Minecraft Java Players
+        unique_id: minecraft_players_java
+        state: "{{ state_attr('sensor.minecraft_server_status', 'players_java') | int(0) }}"
+        icon: mdi:microsoft-xbox-controller
+        unit_of_measurement: players
+
+      - name: Minecraft Bedrock Players
+        unique_id: minecraft_players_bedrock
+        state: "{{ state_attr('sensor.minecraft_server_status', 'players_bedrock') | int(0) }}"
+        icon: mdi:cellphone
+        unit_of_measurement: players
+
+      - name: Minecraft Bedrock Status
+        unique_id: minecraft_bedrock_status
+        state: "{{ state_attr('sensor.minecraft_server_status', 'bedrock_state') or 'inactive' }}"
+        icon: mdi:minecraft
+
+      - name: Minecraft Latency
+        unique_id: minecraft_latency
+        state: "{{ state_attr('sensor.minecraft_server_status', 'latency_ms') | int(0) }}"
+        icon: mdi:speedometer
+        unit_of_measurement: ms
+
+      - name: Minecraft Server Version
+        unique_id: minecraft_server_version
+        state: "{{ state_attr('sensor.minecraft_server_status', 'minecraft_version') or state_attr('sensor.minecraft_server_status', 'configured_version') or 'unknown' }}"
+        icon: mdi:tag
+
+      - name: Minecraft Plugin Count
+        unique_id: minecraft_plugin_count
+        state: "{{ state_attr('sensor.minecraft_server_status', 'plugin_count') | int(0) }}"
+        icon: mdi:puzzle
+
+      - name: Minecraft Backup Count
+        unique_id: minecraft_backup_count
+        state: "{{ state_attr('sensor.minecraft_server_status', 'backup_count') | int(0) }}"
+        icon: mdi:backup-restore
+
+      - name: Minecraft Backup Total
+        unique_id: minecraft_backup_total
+        state: "{{ state_attr('sensor.minecraft_server_status', 'backup_total_mb') | float(0) }}"
+        icon: mdi:database
+        unit_of_measurement: MB
+
+      - name: Minecraft Latest Backup
+        unique_id: minecraft_latest_backup
+        state: "{{ state_attr('sensor.minecraft_server_status', 'latest_backup') or 'none' }}"
+        icon: mdi:archive-clock
+
+      - name: Minecraft World Count
+        unique_id: minecraft_world_count
+        state: "{{ state_attr('sensor.minecraft_server_status', 'world_count') | int(0) }}"
+        icon: mdi:earth-box
+
+      - name: Minecraft World Exists
+        unique_id: minecraft_world_exists
+        state: "{{ 'yes' if state_attr('sensor.minecraft_server_status', 'world_exists') else 'no' }}"
+        icon: mdi:map-check
+
+      - name: Minecraft Active Slot
+        unique_id: minecraft_active_slot
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'active_slot') or 'unknown' }}"
+        icon: mdi:map-marker
+
+      - name: Minecraft Active World
+        unique_id: minecraft_active_world
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'active_world') or 'unknown' }}"
+        icon: mdi:earth
+
+      - name: Minecraft Active Server Name
+        unique_id: minecraft_active_server_name
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'active_server_name') or 'unknown' }}"
+        icon: mdi:server
+
+      - name: Minecraft Active Owner
+        unique_id: minecraft_active_owner
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'active_owner') or 'unknown' }}"
+        icon: mdi:account-key
+
+      - name: Minecraft World 1 Name
+        unique_id: minecraft_world_1_name
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'world_1_name') or 'not set' }}"
+        icon: mdi:cube-outline
+
+      - name: Minecraft World 1 Server Name
+        unique_id: minecraft_world_1_server_name
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'world_1_server_name') or 'not set' }}"
+        icon: mdi:server
+
+      - name: Minecraft World 1 Owner
+        unique_id: minecraft_world_1_owner
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'world_1_owner') or 'not set' }}"
+        icon: mdi:account-key
+
+      - name: Minecraft World 2 Name
+        unique_id: minecraft_world_2_name
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'world_2_name') or 'not set' }}"
+        icon: mdi:cube-outline
+
+      - name: Minecraft World 2 Server Name
+        unique_id: minecraft_world_2_server_name
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'world_2_server_name') or 'not set' }}"
+        icon: mdi:server
+
+      - name: Minecraft World 2 Owner
+        unique_id: minecraft_world_2_owner
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'world_2_owner') or 'not set' }}"
+        icon: mdi:account-key
+
+      - name: Minecraft World 3 Name
+        unique_id: minecraft_world_3_name
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'world_3_name') or 'not set' }}"
+        icon: mdi:cube-outline
+
+      - name: Minecraft World 3 Server Name
+        unique_id: minecraft_world_3_server_name
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'world_3_server_name') or 'not set' }}"
+        icon: mdi:server
+
+      - name: Minecraft World 3 Owner
+        unique_id: minecraft_world_3_owner
+        state: "{{ state_attr('sensor.minecraft_addon_config', 'world_3_owner') or 'not set' }}"
+        icon: mdi:account-key
+
+shell_command:
+  minecraft_select_world_1: "mkdir -p /media/minecraft-java && printf 'world_slot: WORLD_1\\n' > /media/minecraft-java/dashboard-command.yaml"
+  minecraft_select_world_2: "mkdir -p /media/minecraft-java && printf 'world_slot: WORLD_2\\n' > /media/minecraft-java/dashboard-command.yaml"
+  minecraft_select_world_3: "mkdir -p /media/minecraft-java && printf 'world_slot: WORLD_3\\n' > /media/minecraft-java/dashboard-command.yaml"
+  minecraft_select_custom_world: "mkdir -p /media/minecraft-java && printf 'world_slot: CUSTOM\\n' > /media/minecraft-java/dashboard-command.yaml"
+
+script:
+  minecraft_switch_world_1:
+    alias: Minecraft Switch WORLD_1
+    sequence:
+      - service: shell_command.minecraft_select_world_1
+      - service: hassio.addon_restart
+        data:
+          addon: local_minecraft_java
+
+  minecraft_switch_world_2:
+    alias: Minecraft Switch WORLD_2
+    sequence:
+      - service: shell_command.minecraft_select_world_2
+      - service: hassio.addon_restart
+        data:
+          addon: local_minecraft_java
+
+  minecraft_switch_world_3:
+    alias: Minecraft Switch WORLD_3
+    sequence:
+      - service: shell_command.minecraft_select_world_3
+      - service: hassio.addon_restart
+        data:
+          addon: local_minecraft_java
+
+  minecraft_switch_custom_world:
+    alias: Minecraft Switch CUSTOM
+    sequence:
+      - service: shell_command.minecraft_select_custom_world
+      - service: hassio.addon_restart
+        data:
+          addon: local_minecraft_java

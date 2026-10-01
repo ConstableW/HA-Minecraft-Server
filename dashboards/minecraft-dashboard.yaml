@@ -1,0 +1,312 @@
+type: sections
+max_columns: 3
+title: Minecraft
+path: minecraft
+icon: mdi:minecraft
+badges:
+  - type: entity
+    entity: binary_sensor.minecraft_java_server_minecraft_server_online
+    name: Server
+  - type: entity
+    entity: sensor.minecraft_java_server_minecraft_players_online
+    name: Spieler
+  - type: entity
+    entity: sensor.minecraft_java_server_minecraft_bedrock_status
+    name: Bedrock
+  - type: entity
+    entity: sensor.minecraft_java_server_minecraft_active_world
+    name: Welt
+sections:
+  - type: grid
+    cards:
+      - type: markdown
+        content: |
+          # Minecraft Server
+
+          **Add-on:** `local_minecraft_java`
+
+          **Daten:** `/media/minecraft-java`
+
+          **Panel:** `/local_minecraft_java`
+      - type: tile
+        entity: binary_sensor.minecraft_java_server_minecraft_server_online
+        name: Serverstatus
+        icon: mdi:minecraft
+        vertical: false
+        color: green
+      - type: entities
+        title: Aktiv
+        show_header_toggle: false
+        entities:
+          - entity: sensor.minecraft_java_server_minecraft_active_world
+            name: Welt
+          - entity: sensor.minecraft_java_server_minecraft_active_slot
+            name: Slot
+          - entity: sensor.minecraft_java_server_minecraft_active_server_name
+            name: Servername
+          - entity: sensor.minecraft_java_server_minecraft_active_owner
+            name: OP / Owner
+          - entity: sensor.minecraft_java_server_minecraft_server_type
+            name: Typ
+      - type: entities
+        title: Live
+        show_header_toggle: false
+        entities:
+          - entity: sensor.minecraft_java_server_minecraft_players_online
+            name: Spieler online
+          - entity: sensor.minecraft_java_server_minecraft_java_players
+            name: Java
+          - entity: sensor.minecraft_java_server_minecraft_bedrock_players
+            name: Bedrock
+          - entity: sensor.minecraft_java_server_minecraft_players_max
+            name: Spieler max
+          - entity: sensor.minecraft_java_server_minecraft_latency
+            name: Ping
+          - entity: sensor.minecraft_java_server_minecraft_server_version
+            name: Version
+      - type: grid
+        title: Steuerung
+        columns: 3
+        square: false
+        cards:
+          - type: button
+            name: Start
+            icon: mdi:play
+            show_state: false
+            tap_action:
+              action: call-service
+              service: mqtt.publish
+              data:
+                topic: minecraft_java/command/start
+                payload: START
+                retain: false
+            card_mod:
+              style: |
+                ha-card {
+                  background: #1f6fa8;
+                  color: white;
+                  border: 0;
+                  min-height: 88px;
+                }
+                ha-state-icon { color: white; }
+          - type: button
+            name: Stop
+            icon: mdi:stop
+            show_state: false
+            tap_action:
+              action: call-service
+              service: mqtt.publish
+              data:
+                topic: minecraft_java/command/stop
+                payload: STOP
+                retain: false
+              confirmation:
+                text: Minecraft-Server wirklich stoppen?
+            card_mod:
+              style: |
+                ha-card {
+                  background: #b9343c;
+                  color: white;
+                  border: 0;
+                  min-height: 88px;
+                }
+                ha-state-icon { color: white; }
+          - type: conditional
+            conditions:
+              - entity: sensor.minecraft_java_server_minecraft_players_online
+                state: "0"
+            card:
+              type: button
+              name: Neustart
+              icon: mdi:restart
+              show_state: false
+              tap_action:
+                action: call-service
+                service: mqtt.publish
+                data:
+                  topic: minecraft_java/command/restart
+                  payload: RESTART
+                  retain: false
+                confirmation:
+                  text: Minecraft-Server wirklich neu starten?
+              card_mod:
+                style: |
+                  ha-card {
+                    background: #9d6713;
+                    color: white;
+                    border: 0;
+                    min-height: 88px;
+                  }
+                  ha-state-icon { color: white; }
+          - type: conditional
+            conditions:
+              - entity: sensor.minecraft_java_server_minecraft_players_online
+                state_not: "0"
+            card:
+              type: markdown
+              content: |
+                **Neustart gesperrt**
+
+                Spieler sind online.
+      - type: grid
+        title: Add-on
+        columns: 3
+        square: false
+        cards:
+          - type: button
+            name: Panel
+            icon: mdi:view-dashboard
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /local_minecraft_java
+          - type: button
+            name: Logs
+            icon: mdi:text-box-search-outline
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /config/app/local_minecraft_java/logs
+          - type: button
+            name: Info
+            icon: mdi:information-outline
+            show_state: false
+            tap_action:
+              action: navigate
+              navigation_path: /config/app/local_minecraft_java/info
+  - type: grid
+    cards:
+      - type: markdown
+        content: |
+          # Welten
+
+          Der Weltwechsel laeuft ueber MQTT und nutzt denselben Controller wie das Ingress-Panel.
+      - type: entities
+        title: Weltstatus
+        show_header_toggle: false
+        entities:
+          - entity: sensor.minecraft_java_server_minecraft_world_count
+            name: Erkannte Welten
+          - entity: binary_sensor.minecraft_java_server_minecraft_world_exists
+            name: Aktive Welt vorhanden
+          - entity: sensor.minecraft_java_server_minecraft_active_slot
+            name: Aktiver Slot
+      - type: conditional
+        conditions:
+          - entity: sensor.minecraft_java_server_minecraft_players_online
+            state: "0"
+        card:
+          type: entities
+          title: Welt wechseln
+          show_header_toggle: false
+          entities:
+            - entity: select.minecraft_java_server_minecraft_world_slot
+              name: Aktiver Slot
+      - type: conditional
+        conditions:
+          - entity: sensor.minecraft_java_server_minecraft_players_online
+            state_not: "0"
+        card:
+          type: markdown
+          title: Weltwechsel gesperrt
+          content: |
+            Spieler sind online.
+
+            Der Weltwechsel ist erst wieder moeglich, wenn der Server leer ist.
+      - type: entities
+        title: WORLD_1
+        show_header_toggle: false
+        entities:
+          - entity: sensor.minecraft_java_server_minecraft_world_1_name
+            name: Welt
+          - entity: sensor.minecraft_java_server_minecraft_world_1_server_name
+            name: Server
+          - entity: sensor.minecraft_java_server_minecraft_world_1_owner
+            name: OP
+      - type: entities
+        title: WORLD_2
+        show_header_toggle: false
+        entities:
+          - entity: sensor.minecraft_java_server_minecraft_world_2_name
+            name: Welt
+          - entity: sensor.minecraft_java_server_minecraft_world_2_server_name
+            name: Server
+          - entity: sensor.minecraft_java_server_minecraft_world_2_owner
+            name: OP
+      - type: entities
+        title: WORLD_3
+        show_header_toggle: false
+        entities:
+          - entity: sensor.minecraft_java_server_minecraft_world_3_name
+            name: Welt
+          - entity: sensor.minecraft_java_server_minecraft_world_3_server_name
+            name: Server
+          - entity: sensor.minecraft_java_server_minecraft_world_3_owner
+            name: OP
+  - type: grid
+    cards:
+      - type: markdown
+        content: |
+          # Verwaltung
+
+          **Plugins:** `/media/minecraft-java/plugins`
+
+          **Mods:** `/media/minecraft-java/mods`
+
+          **Backups:** `/media/minecraft-java/backups`
+
+          **Config:** `/media/minecraft-java/addon-options.yaml`
+      - type: entities
+        title: Bedrock
+        show_header_toggle: false
+        entities:
+          - entity: sensor.minecraft_java_server_minecraft_bedrock_status
+            name: Status
+          - entity: sensor.minecraft_java_server_minecraft_bedrock_players
+            name: Bedrock-Spieler
+          - entity: sensor.minecraft_java_server_minecraft_java_players
+            name: Java-Spieler
+      - type: markdown
+        title: Konsolen
+        content: |
+          Xbox, PlayStation und Nintendo Switch erlauben keine direkte Eingabe eigener Bedrock-Server.
+
+          Fuer Konsolen kann ein lokaler DNS-Server eine offizielle Serverdomain auf die lokale Minecraft-IP umleiten, zum Beispiel `mco.cubecraft.net -> 192.168.32.14`.
+      - type: entities
+        title: Dateien
+        show_header_toggle: false
+        entities:
+          - entity: sensor.minecraft_java_server_minecraft_plugin_count
+            name: Plugin-JARs
+          - entity: sensor.minecraft_java_server_minecraft_backup_count
+            name: Backups
+          - entity: sensor.minecraft_java_server_minecraft_backup_total
+            name: Backup-Groesse
+          - entity: sensor.minecraft_java_server_minecraft_latest_backup
+            name: Letztes Backup
+      - type: markdown
+        title: playit.gg
+        content: |
+          Das Ingress-Panel zeigt die playit-Adresse und kann den externen Zugang sofort kappen.
+
+          **Notaus fuer aussen:** Im Panel `playit Stop` druecken.
+      - type: markdown
+        title: Plugins
+        content: |
+          Paper und Purpur laden Plugins aus:
+
+          `/media/minecraft-java/plugins`
+
+          Vanilla laedt keine Bukkit/Paper-Plugins.
+      - type: iframe
+        title: Minecraft Ingress Panel
+        url: /local_minecraft_java
+        aspect_ratio: 90%
+      - type: button
+        name: Ingress oeffnen
+        icon: mdi:open-in-new
+        show_state: false
+        tap_action:
+          action: navigate
+          navigation_path: /local_minecraft_java
+cards: []
